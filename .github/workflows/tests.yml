@@ -9,16 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  compile-and-wait:
+  compile:
     runs-on: ubuntu-latest
-
-    env:
-      # базовый репозиторий, куда нужно открыть PR
-      BASE_REPO: mireajava/prnumber1
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Ensure repository is PUBLIC
         if: ${{ github.event.repository.private }}
@@ -26,144 +20,22 @@ jobs:
           echo "❌ Этот форк приватный. Для автопроверки сделайте репозиторий PUBLIC (или дайте преподавателю доступ)."
           exit 1
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Compile sources
-        id: compile
         run: |
           FILES=$(find src/main/java -name "*.java")
           if [ -z "$FILES" ]; then
-            echo "❌ В каталоге src/main/java не найдены .java файлы."
-            exit 1
+            echo "❌ В каталоге src/main/java не найдены .java файлы."; exit 1
           fi
           javac $FILES
           echo "✅ Код скомпилирован."
 
-      # Подсказка студенту: ссылка для открытия PR в базовый репозиторий
-      - name: Hintopen a Pull Request
+      - name: How to run hidden tests
         run: |
-          PR_URL="https://github.com/${{ env.BASE_REPO }}/compare/main...${GITHUB_REPOSITORY%/*}:${GITHUB_REF_NAME}?expand=1"
-          echo ""
-          echo "ℹ️  Чтобы запустились приватные тесты, откройте Pull Request в базовый репозиторий:"
-          echo "   ${PR_URL}"
-          echo ""
-
-      # Проверяем, открыт ли PR в базовый репозиторий с текущей веткой форка.
-      # Если PR открыт — ждём комментарий грейдера; если нет — завершаем с уведомлением.
-      - name: Check if PR to base repo is open
-        id: prcheck
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE_REPO: ${{ env.BASE_REPO }}
-        shell: bash
-        run: |
-          set -e
-          HEAD_SPEC="${{ github.repository_owner }}:${{ github.ref_name }}"
-          echo "Проверяем открытый PR в ${BASE_REPO} с head=${HEAD_SPEC} …"
-          # Ищем открытые PR в базовом репо, у которых head = <fork_owner>:<branch>
-          RESP=$(gh api -X GET "repos/${BASE_REPO}/pulls?state=open&head=${HEAD_SPEC}" 2>/dev/null || true)
-          COUNT=$(printf "%s" "$RESP" | jq 'length')
-          if [ "${COUNT}" -ge 1 ]; then
-            echo "Найден открыт(ые) PR: ${COUNT}."
-            echo "open=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Открытых PR не найдено."
-            echo "open=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # jq понадобится только если действительно ждём комментарии грейдера
-      - name: Ensure jq is available
-        if: ${{ steps.prcheck.outputs.open == 'true' }}
-        run: |
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-
-      # Ждём комментарий грейдера ("Grading result: …") ТОЛЬКО если PR открыт
-      - name: Wait for private grading comment (print full log)
-        if: ${{ steps.prcheck.outputs.open == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA:  ${{ github.sha }}
-          GRADER_PREFIX: "Grading result:"
-          MAX_TRIES: "60"     # ~30 минут ожидания
-          SLEEP_SEC: "30"
-        shell: bash
-        run: |
-          echo "Ожидаем комментарии от автотестов для $REPO@$SHA …"
-          i=0
-          HEADER=""
-
-          while [ $i -lt $MAX_TRIES ]; do
-            RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
-            HEADER=$(echo "$RESP" \
-              | jq -r 'sort_by(.created_at) | reverse | .[] | .body
-                       | select(startswith(env.GRADER_PREFIX))' \
-              | head -n1)
-            if [ -n "$HEADER" ] && [ "$HEADER" != "null" ]; then
-              break
-            fi
-            i=$((i+1))
-            echo "… пока нет (попытка $i/$MAX_TRIES). Спим $SLEEP_SEC сек."
-            sleep "$SLEEP_SEC"
-          done
-
-          if [ -z "$HEADER" ] || [ "$HEADER" = "null" ]; then
-            echo "::warning::Не дождались приватной проверки. Загляните позже в комментарии к коммиту или в общий отчёт преподавателя."
-            exit 0
-          fi
-
-          echo
-          echo "━━━━━━━━━━ РЕЗУЛЬТАТ ВЫПОЛНЕНИЯ ТЕСТОВ ━━━━━━━━━━"
-          printf "%s\n" "$HEADER"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo
-
-          # Собираем все части лога "Grading log (part i/N):" и печатаем их по порядку
-          RESP_ALL=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
-          parts=$(echo "$RESP_ALL" | jq -r '
-            sort_by(.created_at) | .[] | .body
-            | select(startswith("Grading log (part "))
-            | capture("^Grading log \\(part (?<i>[0-9]+)\\/(?<n>[0-9]+)\\):\\n(?:\\n)?```[^\\n]*\\n(?<text>(.|\\n|\\r)*?)\\n```$")
-            | @base64
-          ')
-
-          if [ -z "$parts" ]; then
-            echo "::notice::Дополнительные части лога не найдены."
-          else
-            N=$(echo "$parts" | while read -r line; do echo "$line" | base64 --decode | jq -r '.n'; done | sort -nr | head -n1)
-            echo "▼ Лог из приватной проверки (частей: ${N:-?})"
-            for idx in $(seq 1 ${N:-1}); do
-              chunk=$(echo "$parts" | while read -r line; do
-                        obj=$(echo "$line" | base64 --decode)
-                        ii=$(echo "$obj" | jq -r '.i')
-                        if [ "$ii" = "$idx" ]; then
-                          echo "$obj" | jq -r '.text'
-                          break
-                        fi
-                      done)
-              [ -n "$chunk" ] && printf "%s\n" "$chunk"
-            done
-            echo "▲ Конец лога"
-          fi
-
-          FIRST_LINE=$(printf "%s\n" "$HEADER" | head -n1)
-          if echo "$FIRST_LINE" | grep -qiE '^Grading result:\s*OK\b'; then
-            echo "✅ Приватные тесты пройдены."
-            exit 0
-          else
-            echo "❌ Приватные тесты НЕ пройдены."
-            exit 1
-          fi
-
-      # Если PR не открыт — просто завершаем job успешно, не ждём проверки
-      - name: Finish without waiting (PR not open)
-        if: ${{ steps.prcheck.outputs.open != 'true' }}
-        run: |
-          echo "ℹ️  Откройте PR в ${BASE_REPO}, после чего приватные тесты запустятся автоматически,"
-          echo "    а логи появятся в комментариях к вашему коммиту."
+          echo "Откройте Pull Request в основной репозиторий:"
+          echo "https://github.com/mireajava/prnumber1/compare/main...${GITHUB_REPOSITORY%/*}:${GITHUB_REF_NAME}?expand=1"
+          echo "После открытия PR приватные тесты запустятся автоматически, а логи появятся в комментариях к вашему коммиту."
