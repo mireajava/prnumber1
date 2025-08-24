@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  compile-and-wait:
+  compile-and-trigger:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,6 +29,7 @@ jobs:
           java-version: '21'
 
       - name: Compile sources
+        id: compile
         run: |
           FILES=$(find src/main/java -name "*.java")
           if [ -z "$FILES" ]; then
@@ -36,7 +37,36 @@ jobs:
             exit 1
           fi
           javac $FILES
-          echo "✅ Код скомпилирован. Ожидаем результаты приватной проверки…"
+          echo "✅ Код скомпилирован."
+
+      - name: Trigger private grading in java-course-grading
+        if: ${{ success() && steps.compile.outcome == 'success' }}
+        env:
+          TRIGGER_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}   # секрет из организации
+        run: |
+          if [ -z "$TRIGGER_TOKEN" ]; then
+            echo "::warning::Нет секрета GRADING_TRIGGER_PAT — пропускаем автозапуск приватной проверки."
+            exit 0
+          fi
+
+          OWNER="ВАШ_АККАУНТ_ИЛИ_ОРГ"        # замените на владельца java-course-grading
+          GRADER_REPO="java-course-grading"  # название репозитория с приватными тестами
+
+          echo "📨 Отправляем запрос в $OWNER/$GRADER_REPO …"
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token ${TRIGGER_TOKEN}" \
+            https://api.github.com/repos/${OWNER}/${GRADER_REPO}/dispatches \
+            -d @- <<JSON
+          {
+            "event_type": "grade-request",
+            "client_payload": {
+              "repo": "${{ github.repository }}",
+              "branch": "${{ github.ref_name }}",
+              "sha": "${{ github.sha }}"
+            }
+          }
+JSON
 
       # jq обычно есть на раннере, но подстрахуемся
       - name: Ensure jq is available
@@ -60,7 +90,6 @@ jobs:
           BODY=""
 
           while [ $i -lt $MAX_TRIES ]; do
-            # Берём комментарии к коммиту, сортируем по времени (новые сначала)
             RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
             BODY=$(echo "$RESP" \
               | jq -r 'sort_by(.created_at) | reverse | .[] | .body
@@ -83,21 +112,17 @@ jobs:
 
           echo
           echo "━━━━━━━━━━━━ РЕЗУЛЬТАТ ПРИВАТНЫХ ТЕСТОВ ━━━━━━━━━━━━"
-          # печатаем весь комментарий целиком (со всеми строками и код-блоком)
           printf "%s\n" "$BODY"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo
 
-          # отдельно вытащим код-блок из комментария и напечатаем как «сырой» лог
-          LOG=$(printf "%s\n" "$BODY" | awk 'BEGIN{p=0}
-            /^```/ {p=!p; next} p==1 {print}')
+          LOG=$(printf "%s\n" "$BODY" | awk 'BEGIN{p=0} /^```/ {p=!p; next} p==1 {print}')
           if [ -n "$LOG" ]; then
             echo "▼ Лог из приватной проверки (как есть)"
             printf "%s\n" "$LOG"
             echo "▲ Конец лога"
           fi
 
-          # успешность определяем по первой строке
           FIRST_LINE=$(printf "%s\n" "$BODY" | head -n1)
           if echo "$FIRST_LINE" | grep -qiE '^Grading result:\s*OK\b'; then
             echo "✅ Приватные тесты пройдены."
