@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  compile-and-trigger:
+  compile-and-wait:
     runs-on: ubuntu-latest
 
     steps:
@@ -39,36 +39,23 @@ jobs:
           javac $FILES
           echo "✅ Код скомпилирован."
 
+      # Триггер приватного грейдера без heredoc — через gh api
       - name: Trigger private grading in java-course-grading
         if: ${{ success() && steps.compile.outcome == 'success' }}
         env:
-          TRIGGER_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}   # секрет из организации
+          GH_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}   # орг-секрет с PAT
         run: |
-          if [ -z "$TRIGGER_TOKEN" ]; then
+          if [ -z "$GH_TOKEN" ]; then
             echo "::warning::Нет секрета GRADING_TRIGGER_PAT — пропускаем автозапуск приватной проверки."
             exit 0
           fi
+          OWNER="ВАШ_АККАУНТ_ИЛИ_ОРГ"
+          GRADER_REPO="java-course-grading"
+          echo "Отправляем repository_dispatch в ${OWNER}/${GRADER_REPO}…"
+          gh api repos/${OWNER}/${GRADER_REPO}/dispatches \
+            -f event_type=grade-request \
+            -f client_payload:="{\"repo\":\"${{ github.repository }}\",\"branch\":\"${{ github.ref_name }}\",\"sha\":\"${{ github.sha }}\"}"
 
-          OWNER="ВАШ_АККАУНТ_ИЛИ_ОРГ"        # замените на владельца java-course-grading
-          GRADER_REPO="java-course-grading"  # название репозитория с приватными тестами
-
-          echo "📨 Отправляем запрос в $OWNER/$GRADER_REPO …"
-          curl -s -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: token ${TRIGGER_TOKEN}" \
-            https://api.github.com/repos/${OWNER}/${GRADER_REPO}/dispatches \
-            -d @- <<JSON
-          {
-            "event_type": "grade-request",
-            "client_payload": {
-              "repo": "${{ github.repository }}",
-              "branch": "${{ github.ref_name }}",
-              "sha": "${{ github.sha }}"
-            }
-          }
-JSON
-
-      # jq обычно есть на раннере, но подстрахуемся
       - name: Ensure jq is available
         run: |
           if ! command -v jq >/dev/null 2>&1; then
@@ -85,45 +72,65 @@ JSON
           SLEEP_SEC: "30"
         shell: bash
         run: |
-          echo "Ожидаем комментарий от приватного грейдера для $REPO@$SHA …"
+          echo "Ожидаем комментарии от автотестов для $REPO@$SHA …"
           i=0
-          BODY=""
+          HEADER=""
 
+          # ждём заголовок "Grading result:"
           while [ $i -lt $MAX_TRIES ]; do
             RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
-            BODY=$(echo "$RESP" \
+            HEADER=$(echo "$RESP" \
               | jq -r 'sort_by(.created_at) | reverse | .[] | .body
                        | select(startswith(env.GRADER_PREFIX))' \
               | head -n1)
-
-            if [ -n "$BODY" ] && [ "$BODY" != "null" ]; then
+            if [ -n "$HEADER" ] && [ "$HEADER" != "null" ]; then
               break
             fi
-
             i=$((i+1))
             echo "… пока нет (попытка $i/$MAX_TRIES). Спим $SLEEP_SEC сек."
             sleep "$SLEEP_SEC"
           done
 
-          if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
+          if [ -z "$HEADER" ] || [ "$HEADER" = "null" ]; then
             echo "::warning::Не дождались приватной проверки. Загляните позже в комментарии к коммиту или в общий отчёт преподавателя."
             exit 0
           fi
 
           echo
-          echo "━━━━━━━━━━━━ РЕЗУЛЬТАТ ПРИВАТНЫХ ТЕСТОВ ━━━━━━━━━━━━"
-          printf "%s\n" "$BODY"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━ РЕЗУЛЬТАТ ВЫПОЛНЕНИЯ ТЕСТОВ ━━━━━━━━━━"
+          printf "%s\n" "$HEADER"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo
 
-          LOG=$(printf "%s\n" "$BODY" | awk 'BEGIN{p=0} /^```/ {p=!p; next} p==1 {print}')
-          if [ -n "$LOG" ]; then
-            echo "▼ Лог из приватной проверки (как есть)"
-            printf "%s\n" "$LOG"
+          # собираем все части лога "Grading log (part i/N):" и печатаем по порядку
+          RESP_ALL=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
+          parts=$(echo "$RESP_ALL" | jq -r '
+            sort_by(.created_at) | .[] | .body
+            | select(startswith("Grading log (part "))
+            | capture("^Grading log \\(part (?<i>[0-9]+)\\/(?<n>[0-9]+)\\):\\n(?:\\n)?```[^\\n]*\\n(?<text>(.|\\n|\\r)*?)\\n```$")
+            | @base64
+          ')
+
+          if [ -z "$parts" ]; then
+            echo "::notice::Дополнительные части лога не найдены."
+          else
+            N=$(echo "$parts" | while read -r line; do echo "$line" | base64 --decode | jq -r '.n'; done | sort -nr | head -n1)
+            echo "▼ Лог из приватной проверки (частей: ${N:-?})"
+            for idx in $(seq 1 ${N:-1}); do
+              chunk=$(echo "$parts" | while read -r line; do
+                        obj=$(echo "$line" | base64 --decode)
+                        ii=$(echo "$obj" | jq -r '.i')
+                        if [ "$ii" = "$idx" ]; then
+                          echo "$obj" | jq -r '.text'
+                          break
+                        fi
+                      done)
+              [ -n "$chunk" ] && printf "%s\n" "$chunk"
+            done
             echo "▲ Конец лога"
           fi
 
-          FIRST_LINE=$(printf "%s\n" "$BODY" | head -n1)
+          FIRST_LINE=$(printf "%s\n" "$HEADER" | head -n1)
           if echo "$FIRST_LINE" | grep -qiE '^Grading result:\s*OK\b'; then
             echo "✅ Приватные тесты пройдены."
             exit 0
