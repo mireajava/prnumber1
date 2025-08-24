@@ -16,7 +16,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Если форк частный — честно сообщаем и останавливаемся
       - name: Ensure repository is PUBLIC
         if: ${{ github.event.repository.private }}
         run: |
@@ -39,27 +38,24 @@ jobs:
           javac $FILES
           echo "✅ Код скомпилирован. Ожидаем результаты приватной проверки…"
 
-      - name: Wait for private grading comment
+      - name: Wait for private grading comment (and print full log)
         env:
-          GH_TOKEN: ${{ github.token }}   # встроенный токен студенческого репо
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA:  ${{ github.sha }}
-          GRADER_PREFIX: "Grading result:"  # префикс, по которому узнаём ответ грейдера
-          MAX_TRIES: "60"   # 60 попыток × 30 сек ≈ 30 минут ожидания
+          GRADER_PREFIX: "Grading result:"
+          MAX_TRIES: "60"     # до ~30 минут ожидания
           SLEEP_SEC: "30"
         shell: bash
         run: |
           echo "Ожидаем комментарий от приватного грейдера для $REPO@$SHA …"
           i=0
-          FOUND=""
           BODY=""
           while [ $i -lt $MAX_TRIES ]; do
-            # читаем ВСЕ комментарии к коммиту, выбираем строки с нужным префиксом
-            RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" -q '.[].body' || true)
-            MATCH=$(printf "%s\n" "$RESP" | awk -v pfx="$GRADER_PREFIX" 'index($0,pfx)==1 {print; exit}')
-            if [ -n "$MATCH" ]; then
-              FOUND="yes"
-              BODY="$MATCH"
+            RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" || true)
+            # вытаскиваем самое свежее тело комментария, начинающееся с префикса
+            BODY=$(echo "$RESP" | jq -r '.[] | select(.body|startswith(env.GRADER_PREFIX)) | .body' | head -n1)
+            if [ -n "$BODY" ] && [ "$BODY" != "null" ]; then
               break
             fi
             i=$((i+1))
@@ -67,16 +63,20 @@ jobs:
             sleep "$SLEEP_SEC"
           done
 
-          if [ -z "$FOUND" ]; then
+          if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
             echo "::warning::Не дождались приватной проверки. Загляните позже в комментарии к коммиту или в общий отчёт преподавателя."
             exit 0
           fi
 
-          echo "Сообщение грейдера:"
+          echo
+          echo "━━━━━━━━━━━━━━━━━━━ РЕЗУЛЬТАТ ПРИВАТНЫХ ТЕСТОВ ━━━━━━━━━━━━━━━━━━━"
           echo "$BODY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo
 
-          # ожидаем один из вариантов: "Grading result: OK" или "Grading result: FAILED"
-          if echo "$BODY" | grep -qiE '^Grading result:\s*OK\b'; then
+          # считаем успех по первой строке "Grading result: OK/FAILED"
+          FIRST_LINE=$(printf "%s\n" "$BODY" | head -n1)
+          if echo "$FIRST_LINE" | grep -qiE '^Grading result:\s*OK\b'; then
             echo "✅ Приватные тесты пройдены."
             exit 0
           else
