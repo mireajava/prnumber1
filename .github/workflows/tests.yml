@@ -1,0 +1,15 @@
+name: Tests
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run grading action
+        uses: your-org/java-course-test-action@v1
+        with:
+          project: "yuan-to-ruble"
