@@ -19,7 +19,7 @@ jobs:
       - name: Ensure repository is PUBLIC
         if: ${{ github.event.repository.private }}
         run: |
-          echo "❌ Этот форк приватный. Для автоматической проверки сделайте репозиторий PUBLIC (или дайте преподавателю доступ)."
+          echo "❌ Этот форк приватный. Для автопроверки сделайте репозиторий PUBLIC (или дайте преподавателю доступ)."
           exit 1
 
       - name: Set up Java
@@ -38,26 +38,39 @@ jobs:
           javac $FILES
           echo "✅ Код скомпилирован. Ожидаем результаты приватной проверки…"
 
-      - name: Wait for private grading comment (and print full log)
+      # jq обычно есть на раннере, но подстрахуемся
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
+      - name: Wait for private grading comment (print full log)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA:  ${{ github.sha }}
           GRADER_PREFIX: "Grading result:"
-          MAX_TRIES: "60"     # до ~30 минут ожидания
+          MAX_TRIES: "60"     # ~30 минут ожидания
           SLEEP_SEC: "30"
         shell: bash
         run: |
           echo "Ожидаем комментарий от приватного грейдера для $REPO@$SHA …"
           i=0
           BODY=""
+
           while [ $i -lt $MAX_TRIES ]; do
-            RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" || true)
-            # вытаскиваем самое свежее тело комментария, начинающееся с префикса
-            BODY=$(echo "$RESP" | jq -r '.[] | select(.body|startswith(env.GRADER_PREFIX)) | .body' | head -n1)
+            # Берём комментарии к коммиту, сортируем по времени (новые сначала)
+            RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
+            BODY=$(echo "$RESP" \
+              | jq -r 'sort_by(.created_at) | reverse | .[] | .body
+                       | select(startswith(env.GRADER_PREFIX))' \
+              | head -n1)
+
             if [ -n "$BODY" ] && [ "$BODY" != "null" ]; then
               break
             fi
+
             i=$((i+1))
             echo "… пока нет (попытка $i/$MAX_TRIES). Спим $SLEEP_SEC сек."
             sleep "$SLEEP_SEC"
@@ -69,12 +82,22 @@ jobs:
           fi
 
           echo
-          echo "━━━━━━━━━━━━━━━━━━━ РЕЗУЛЬТАТ ПРИВАТНЫХ ТЕСТОВ ━━━━━━━━━━━━━━━━━━━"
-          echo "$BODY"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━ РЕЗУЛЬТАТ ПРИВАТНЫХ ТЕСТОВ ━━━━━━━━━━━━"
+          # печатаем весь комментарий целиком (со всеми строками и код-блоком)
+          printf "%s\n" "$BODY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo
 
-          # считаем успех по первой строке "Grading result: OK/FAILED"
+          # отдельно вытащим код-блок из комментария и напечатаем как «сырой» лог
+          LOG=$(printf "%s\n" "$BODY" | awk 'BEGIN{p=0}
+            /^```/ {p=!p; next} p==1 {print}')
+          if [ -n "$LOG" ]; then
+            echo "▼ Лог из приватной проверки (как есть)"
+            printf "%s\n" "$LOG"
+            echo "▲ Конец лога"
+          fi
+
+          # успешность определяем по первой строке
           FIRST_LINE=$(printf "%s\n" "$BODY" | head -n1)
           if echo "$FIRST_LINE" | grep -qiE '^Grading result:\s*OK\b'; then
             echo "✅ Приватные тесты пройдены."
