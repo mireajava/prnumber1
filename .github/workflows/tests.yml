@@ -39,61 +39,30 @@ jobs:
           javac $FILES
           echo "✅ Код скомпилирован."
 
-      # Пытаемся запустить приватный грейдер. Даём подробную диагностику и
-      # выставляем флаг sent=true только при успешном 204.
+      # Триггер приватного грейдера без heredoc — через gh api
       - name: Trigger private grading in java-course-grading
         if: ${{ success() && steps.compile.outcome == 'success' }}
-        id: trigger
         env:
-          GH_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}   # PAT (classic): public_repo (или repo для приватного грейдера)
-          OWNER:   ВАШ_АККАУНТ_ИЛИ_ОРГ                   # ← замените на владельца грейдера
-          GRADER:  java-course-grading                   # ← при необходимости
-        shell: bash
+          GH_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}   # орг-секрет с PAT
         run: |
-          set -e
-          SENT=false
-
           if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::GRADING_TRIGGER_PAT недоступен в этом репозитории (форки студентов не видят org secrets)."
-            echo "::notice::Приватная проверка запустится через PR в основной репозиторий преподавателя или вручную."
-            echo "sent=$SENT" >> "$GITHUB_OUTPUT"
+            echo "::warning::Нет секрета GRADING_TRIGGER_PAT — пропускаем автозапуск приватной проверки."
             exit 0
           fi
-
-          echo "Авторизуемся токеном…"
-          gh api user -q '.login' || { echo "::error::Не удалось авторизоваться GH_TOKEN'ом"; exit 1; }
-
-          echo "Проверяем доступ к ${OWNER}/${GRADER}…"
-          gh api -i "repos/${OWNER}/${GRADER}" >/dev/null
-
-          echo "Отправляем repository_dispatch (repo=${{ github.repository }}, branch=${{ github.ref_name }}, sha=${{ github.sha }})…"
-          # Успех = HTTP/1.1 204 No Content
-          RESP=$(gh api -i "repos/${OWNER}/${GRADER}/dispatches" \
+          OWNER="ВАШ_АККАУНТ_ИЛИ_ОРГ"
+          GRADER_REPO="java-course-grading"
+          echo "Отправляем repository_dispatch в ${OWNER}/${GRADER_REPO}…"
+          gh api repos/${OWNER}/${GRADER_REPO}/dispatches \
             -f event_type=grade-request \
-            -f client_payload:="{\"repo\":\"${{ github.repository }}\",\"branch\":\"${{ github.ref_name }}\",\"sha\":\"${{ github.sha }}\"}" \
-            2>&1 || true)
+            -f client_payload:="{\"repo\":\"${{ github.repository }}\",\"branch\":\"${{ github.ref_name }}\",\"sha\":\"${{ github.sha }}\"}"
 
-          echo "$RESP"
-
-          if echo "$RESP" | grep -qE '^HTTP/1\.1 204 '; then
-            SENT=true
-            echo "✅ repository_dispatch отправлен."
-          else
-            echo "::warning::Не удалось отправить repository_dispatch. См. вывод выше (возможны 401/403/404: нет прав у PAT, SSO не авторизован, неверный OWNER/GRADER)."
-          fi
-
-          echo "sent=$SENT" >> "$GITHUB_OUTPUT"
-
-      # jq ставим только если действительно ждём комментарий от грейдера
       - name: Ensure jq is available
-        if: ${{ steps.trigger.outputs.sent == 'true' }}
         run: |
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
       - name: Wait for private grading comment (print full log)
-        if: ${{ steps.trigger.outputs.sent == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -107,6 +76,7 @@ jobs:
           i=0
           HEADER=""
 
+          # ждём заголовок "Grading result:"
           while [ $i -lt $MAX_TRIES ]; do
             RESP=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
             HEADER=$(echo "$RESP" \
@@ -132,7 +102,7 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo
 
-          # собираем части лога "Grading log (part i/N):" по порядку
+          # собираем все части лога "Grading log (part i/N):" и печатаем по порядку
           RESP_ALL=$(gh api -X GET "repos/$REPO/commits/$SHA/comments" 2>/dev/null || true)
           parts=$(echo "$RESP_ALL" | jq -r '
             sort_by(.created_at) | .[] | .body
