@@ -1,0 +1,32 @@
+name: Forward PR to grader
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to java-course-grading
+        env:
+          GH_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}   # PAT владельца, scope: public_repo (или repo, если грейдер приватный)
+          OWNER:   ВАШ_АККАУНТ_ИЛИ_ОРГ                    # ← замените
+          GRADER:  java-course-grading
+          REPO:    ${{ github.event.pull_request.head.repo.full_name }}
+          BRANCH:  ${{ github.event.pull_request.head.ref }}
+          SHA:     ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Нет секрета GRADING_TRIGGER_PAT в базовом репозитории."
+            exit 1
+          fi
+
+          echo "PR from: $REPO  branch: $BRANCH  sha: $SHA"
+          # 204 — это успех
+          gh api -i "repos/${OWNER}/${GRADER}/dispatches" \
+            -f event_type=grade-request \
+            -f client_payload:="{\"repo\":\"${REPO}\",\"branch\":\"${BRANCH}\",\"sha\":\"${SHA}\"}"
