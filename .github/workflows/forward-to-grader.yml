@@ -17,7 +17,7 @@ jobs:
           # секрет в БАЗОВОМ репо mireajava/prnumber1:
           # PAT (classic) со scope: public_repo (или repo, если грейдер/форки приватные)
           GH_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}
-          OWNER:   ВАШ_АККАУНТ_ИЛИ_ОРГ         # ← замените
+          OWNER:   mireajava         # ← замените
           GRADER:  java-course-grading
           REPO:    ${{ github.event.pull_request.head.repo.full_name }}
           BRANCH:  ${{ github.event.pull_request.head.ref }}
