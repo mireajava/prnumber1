@@ -1,54 +1,37 @@
-name: Forward PR to grader
+name: Trigger grader on PR
 
 on:
-  # работает для PR из форков и имеет доступ к secrets базового репо
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
-  forward:
+  dispatch-to-grader:
     runs-on: ubuntu-latest
     steps:
-      - name: Send repository_dispatch to java-course-grading
+      # Получаем installation-token вашего GitHub App для репозитория грейдера
+      - name: App token for grader repo
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}                 # <- ID GitHub App
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}   # <- PEM GitHub App
+          owner: mireajava                    # <- замените
+          repositories: java-course-grading             # <- имя репо с приватными тестами
+
+      - name: Send repository_dispatch to grader
         env:
-          # секрет в БАЗОВОМ репо mireajava/prnumber1:
-          # PAT (classic) со scope: public_repo (или repo, если грейдер/форки приватные)
-          GH_TOKEN: ${{ secrets.GRADING_TRIGGER_PAT }}
-          OWNER:   mireajava         # ← замените
-          GRADER:  java-course-grading
-          REPO:    ${{ github.event.pull_request.head.repo.full_name }}
-          BRANCH:  ${{ github.event.pull_request.head.ref }}
-          SHA:     ${{ github.event.pull_request.head.sha }}
-        shell: bash
+          GH_TOKEN:   ${{ steps.app.outputs.token }}
+          GRADER_OWNER: mireajava
+          GRADER_REPO:  java-course-grading
+          STUDENT_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          STUDENT_REF:  ${{ github.event.pull_request.head.ref }}
+          STUDENT_SHA:  ${{ github.event.pull_request.head.sha }}
         run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::Нет секрета GRADING_TRIGGER_PAT в базовом репозитории."
-            exit 1
-          fi
-
-          echo "PR from: $REPO"
-          echo "Branch : $BRANCH"
-          echo "SHA    : $SHA"
-
-          # Отправляем сигнал в грейдер и выводим код ответа для диагностики
-          HTTP_CODE=$(curl -sS -w "%{http_code}" -o /tmp/resp.txt \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${OWNER}/${GRADER}/dispatches" \
-            -d "{\"event_type\":\"grade-request\",\"client_payload\":{\"repo\":\"${REPO}\",\"branch\":\"${BRANCH}\",\"sha\":\"${SHA}\"}}")
-
-          echo "GitHub API status: ${HTTP_CODE}"
-          echo "Response body:"
-          cat /tmp/resp.txt || true
-
-          # Успех — 204
-          if [ "$HTTP_CODE" != "204" ]; then
-            echo "::error::Не удалось отправить repository_dispatch (ожидали 204). Проверьте OWNER/GRADER и права токена."
-            exit 1
-          fi
-          echo "✅ Dispatch delivered."
+          echo "Dispatching to ${GRADER_OWNER}/${GRADER_REPO} for ${STUDENT_REPO}@${STUDENT_SHA} (${STUDENT_REF})…"
+          gh api -i repos/${GRADER_OWNER}/${GRADER_REPO}/dispatches \
+            -f event_type=grade-request \
+            -f client_payload:="{\"repo\":\"${STUDENT_REPO}\",\"branch\":\"${STUDENT_REF}\",\"sha\":\"${STUDENT_SHA}\"}"
+          echo "✅ repository_dispatch sent."
