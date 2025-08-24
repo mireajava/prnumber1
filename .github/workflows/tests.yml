@@ -1,4 +1,4 @@
-name: Public Tests
+name: Build check
 
 on:
   push:
@@ -6,9 +6,8 @@ on:
   pull_request:
 
 jobs:
-  tests:
+  compile:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,8 +18,10 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Gradle
-        uses: gradle/gradle-build-action@v2
+      - name: Compile sources
+        run: javac $(find src/main/java -name "*.java")
 
-      - name: Run tests
-        run: gradle clean test
+      - name: Notify student
+        run: |
+          echo "✅ Код скомпилирован."
+          echo "Полная проверка выполняется у преподавателя."
