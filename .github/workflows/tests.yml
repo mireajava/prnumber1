@@ -44,7 +44,7 @@ jobs:
           echo "✅ Код скомпилирован."
 
       # Подсказка студенту: ссылка для открытия PR в базовый репозиторий
-      - name: Hint: open a Pull Request
+      - name: Hint open a Pull Request
         run: |
           PR_URL="https://github.com/${{ env.BASE_REPO }}/compare/main...${GITHUB_REPOSITORY%/*}:${GITHUB_REF_NAME}?expand=1"
           echo ""
