@@ -8,9 +8,17 @@ on:
 jobs:
   compile:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # ⛔ Если репозиторий приватный — сразу проваливаем сборку
+      - name: Ensure repository is PUBLIC
+        if: ${{ github.event.repository.private }}
+        run: |
+          echo "❌ Этот форк приватный. Для автоматической проверки сделайте репозиторий PUBLIC (или дайте преподавателю доступ)."
+          exit 1
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -18,10 +26,17 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # Более устойчиво компилируем: если .java не найдены — даём понятное сообщение
       - name: Compile sources
-        run: javac $(find src/main/java -name "*.java")
+        run: |
+          FILES=$(find src/main/java -name "*.java")
+          if [ -z "$FILES" ]; then
+            echo "❌ В каталоге src/main/java не найдены .java файлы."
+            exit 1
+          fi
+          javac $FILES
 
       - name: Notify student
         run: |
           echo "✅ Код скомпилирован."
-          echo "Полная проверка выполняется у преподавателя."
+          echo "ℹ️ Полная проверка выполняется у преподавателя."
